@@ -1,0 +1,14 @@
+# Secretos: NUNCA subirlos
+.env
+credentials.json
+token.json
+*.sql.gz
+backup-*.sql
+finbot-*.sql
+
+# Entornos virtuales y basura
+venv/
+venv-drive/
+__pycache__/
+*.pyc
+.DS_Store

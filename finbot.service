@@ -1,0 +1,16 @@
+[Unit]
+Description=Finbot - bot de finanzas personales
+After=network.target mysql.service
+
+[Service]
+Type=simple
+User=finbot
+WorkingDirectory=/opt/finbot
+# Carga las variables de entorno desde el archivo .env
+EnvironmentFile=/opt/finbot/.env
+ExecStart=/opt/finbot/venv/bin/python /opt/finbot/bot.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
