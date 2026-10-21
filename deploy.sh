@@ -5,6 +5,11 @@
 set -euo pipefail
 cd /opt/finbot
 
+# Antes de tocar nada: si falta algo, el bot actual sigue corriendo
+for f in .env token.json venv/bin/pip; do
+  [ -e "$f" ] || { echo "ERROR: falta /opt/finbot/$f (ver README). No se cambió nada."; exit 1; }
+done
+
 echo "==> Bajando la última versión de GitHub"
 git fetch --quiet origin main
 git reset --hard origin/main   # .env, token.json y venv no se tocan (están en .gitignore)
