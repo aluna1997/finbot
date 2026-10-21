@@ -114,12 +114,12 @@ INSERT IGNORE INTO portafolios (descripcion) VALUES
 --   SET activo = descripcion IN ('PROFUTURO','ACTIVA','MERCADO PAGO');
 
 -- ------------------------------------------------------------
---  v4 (2026-10-20) — Se eliminan forma de pago y conciliado   [PENDIENTE]
+--  v4 (2026-10-20) — Se eliminan forma de pago y conciliado   [APLICADA]
 -- ------------------------------------------------------------
 --  Si el primer ALTER marca error, revisa el nombre real de la llave con
 --  SHOW CREATE TABLE gastos;  (la línea CONSTRAINT ... REFERENCES formas_pago)
 --  y cámbialo abajo.
-USE finbot;
-ALTER TABLE gastos DROP FOREIGN KEY fk_gasto_formapago;
-ALTER TABLE gastos DROP COLUMN forma_pago_id, DROP COLUMN conciliado;
-DROP TABLE formas_pago;
+-- USE finbot;
+-- ALTER TABLE gastos DROP FOREIGN KEY fk_gasto_formapago;
+-- ALTER TABLE gastos DROP COLUMN forma_pago_id, DROP COLUMN conciliado;
+-- DROP TABLE formas_pago;
