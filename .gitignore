@@ -2,9 +2,6 @@
 .env
 credentials.json
 token.json
-*.sql.gz
-backup-*.sql
-finbot-*.sql
 
 # Entornos virtuales y basura
 venv/

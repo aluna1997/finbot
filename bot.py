@@ -9,7 +9,8 @@ Flujos:
   - INGRESO         -> elige fuente -> monto
   - AHORRO          -> elige portafolio -> monto
   - RESUMEN         -> resumen del mes (también llega solo a las 10:00 CDMX)
-  (La conciliación se hace a mano en DBeaver.)
+  - Recordatorio de quincena: llega solo los días 15 y último del mes a las 10:00
+  - DESHACER        -> borra el último gasto (pide confirmación)
 
 Arquitectura simple: como es un solo usuario, procesamos el ticket con la IA
 en el momento. Toma un par de segundos; para un uso personal está bien.
@@ -96,18 +97,11 @@ def cat_id(desc):
     return r[0] if r else None
 
 
-def forma_id(desc):
-    if not desc:
-        return None
-    r = db_run("SELECT id FROM formas_pago WHERE descripcion=%s", (desc.upper(),), "one")
-    return r[0] if r else None
-
-
 # ---------------- Google Drive ----------------
 
 def subir_foto(data: bytes) -> str:
     """Sube la foto a la carpeta de Drive y devuelve su liga."""
-    # token.json se genera una vez con autorizar_drive.py (ver GUIA, PARTE 5)
+    # token.json se genera una vez con autorizar_drive.py (ver README)
     creds = Credentials.from_authorized_user_file("/opt/finbot/token.json")
     svc = build("drive", "v3", credentials=creds)
     meta = {"name": f"ticket-{dt.datetime.now(TZ):%Y%m%d-%H%M%S}.jpg",
@@ -121,11 +115,10 @@ def subir_foto(data: bytes) -> str:
 
 def leer_ticket(imagen_b64=None, texto=None):
     cats = [c[0] for c in db_run("SELECT descripcion FROM categorias", fetch="all")]
-    formas = [f[0] for f in db_run("SELECT descripcion FROM formas_pago", fetch="all")]
     sistema = (
         "Eres un asistente de gastos personales en México. Devuelve SOLO un JSON "
-        '{"descripcion","monto","categoria","forma_pago","se_sugiere_facturar"}. '
-        f"Categorías válidas: {', '.join(cats)}. Formas de pago: {', '.join(formas)}. "
+        '{"descripcion","monto","categoria","se_sugiere_facturar"}. '
+        f"Categorías válidas: {', '.join(cats)}. "
         "descripcion en MAYÚSCULAS. se_sugiere_facturar=true SOLO si el gasto encaja "
         f"en deducciones del SAT para sueldos y salarios: {'; '.join(DEDUCIBLES_SAT)}. "
         "Es orientativo, no asesoría fiscal."
@@ -211,6 +204,28 @@ async def on_callback(update, context):
         context.user_data["esperando"] = "monto_ahorro"
         context.user_data["portafolio_id"] = int(data.split("_")[1])
         await q.edit_message_text("¿Cuánto? (número, negativo = retiro)")
+    elif data.startswith("borrar_"):
+        db_run("DELETE FROM gastos WHERE id=%s", (int(data.split("_")[1]),))
+        await q.edit_message_text("🗑️ Gasto borrado.")
+    elif data == "noborrar":
+        await q.edit_message_text("Ok, no se borró nada.")
+
+
+async def cmd_deshacer(update, context):
+    if not solo_yo(update):
+        return
+    g = db_run("SELECT id, descripcion, monto, fecha FROM gastos ORDER BY id DESC LIMIT 1",
+               fetch="one")
+    if not g:
+        await update.message.reply_text("No hay gastos para borrar.")
+        return
+    gid, desc, monto, fecha = g
+    botones = [[InlineKeyboardButton("Sí, borrar", callback_data=f"borrar_{gid}"),
+                InlineKeyboardButton("No", callback_data="noborrar")]]
+    # sin Markdown: la descripción puede traer * o _
+    await update.message.reply_text(
+        f"¿Borrar el último gasto?\n📝 {desc}\n💵 ${monto:,.2f}\n📅 {fecha:%d/%m/%Y}",
+        reply_markup=InlineKeyboardMarkup(botones))
 
 
 def parse_monto(texto):
@@ -335,15 +350,13 @@ def _guardar_gasto(datos, tipo, url_foto):
     """
     monto = Decimal(str(datos["monto"])).quantize(Decimal("0.01"))
     categoria = datos.get("categoria", "OTROS")
-    forma = datos.get("forma_pago")
     es_vacaciones = tipo == "vacaciones"
     es_pareja = tipo == "pareja" or es_vacaciones
     db_run(
-        "INSERT INTO gastos (descripcion, monto, categoria_id, forma_pago_id, "
+        "INSERT INTO gastos (descripcion, monto, categoria_id, "
         "es_pareja, es_vacaciones, se_sugiere_facturar, url_foto, status) "
-        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'procesado')",
-        (datos["descripcion"].upper(), monto,
-         cat_id(categoria), forma_id(forma),
+        "VALUES (%s,%s,%s,%s,%s,%s,%s,'procesado')",
+        (datos["descripcion"].upper(), monto, cat_id(categoria),
          es_pareja, es_vacaciones, bool(datos.get("se_sugiere_facturar")), url_foto))
     # armar mensaje de confirmación
     lineas = [
@@ -352,8 +365,6 @@ def _guardar_gasto(datos, tipo, url_foto):
         f"💵 ${monto:,.2f}",
         f"🏷️ {categoria.title()}",
     ]
-    if forma:
-        lineas.append(f"💳 {forma.title()}")
     if es_vacaciones:
         lineas.append("🏖️ Vacaciones (de pareja)")
     elif es_pareja:
@@ -429,6 +440,44 @@ async def cmd_resumen(update, context):
     await enviar_resumen(context)
 
 
+# ---------------- Recordatorio de quincena ----------------
+
+QUINCENA = """*Quincena — Distribución de apartados*
+
+*Transferir hoy (automático):*
+- Ahorro casa: $8,400
+- Fondo de emergencia: $4,500
+- Vacaciones: $1,500
+Total apartado: $14,400
+
+*Disponible para gastar (Banregio): $15,600*
+- Fijos / hogar: $7,500
+- Individuales: $4,500
+- Ocio: $3,600
+
+*Checklist:*
+☐ Se aplicaron las 3 transferencias
+☐ Saldo suficiente para el pago de la TDC"""
+
+QUINCENA_FIN_DE_MES = "☐ Vales ($990) usados en súper"
+
+QUINCENA_CIERRE = "\n\nRecuerda: si gastas con TDC, que sea Banregio."
+
+
+def armar_quincena(hoy: dt.date) -> str:
+    fin_de_mes = (hoy + dt.timedelta(days=1)).day == 1
+    extra = "\n" + QUINCENA_FIN_DE_MES if fin_de_mes else ""
+    return QUINCENA + extra + QUINCENA_CIERRE
+
+
+async def tarea_diaria(context):
+    """10:00 CDMX: resumen diario y, los días 15 y último del mes, la quincena."""
+    await enviar_resumen(context)
+    hoy = dt.datetime.now(TZ).date()
+    if hoy.day == 15 or (hoy + dt.timedelta(days=1)).day == 1:
+        await context.bot.send_message(MI_CHAT_ID, armar_quincena(hoy), parse_mode="Markdown")
+
+
 def main():
     app = Application.builder().token(TG_TOKEN).build()
     # palabras clave (aceptan mayúscula/minúscula por regex)
@@ -436,10 +485,11 @@ def main():
     app.add_handler(MessageHandler(filters.Regex(r"(?i)^ingreso$"), cmd_ingreso))
     app.add_handler(MessageHandler(filters.Regex(r"(?i)^ahorro$"), cmd_ahorro))
     app.add_handler(MessageHandler(filters.Regex(r"(?i)^resumen$"), cmd_resumen))
+    app.add_handler(MessageHandler(filters.Regex(r"(?i)^deshacer$"), cmd_deshacer))
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(MessageHandler(filters.PHOTO, on_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
-    app.job_queue.run_daily(enviar_resumen, time=dt.time(10, 0, tzinfo=TZ))
+    app.job_queue.run_daily(tarea_diaria, time=dt.time(10, 0, tzinfo=TZ))
     log.info("Finbot corriendo (polling)…")
     app.run_polling()
 
