@@ -85,9 +85,11 @@ Las cuentas de ahorro se controlan en la base: solo aparecen las de la tabla
 | Archivo | Para qué |
 |---|---|
 | [bot.py](bot.py) | Todo el bot. |
-| [schema.sql](schema.sql) | Toda la base de datos: creación **y** migraciones. |
+| [schema.sql](schema.sql) | Toda la base de datos: creación de tablas y, al final, el historial de migraciones. |
 | [requirements.txt](requirements.txt) | Dependencias de Python. |
 | [finbot.service](finbot.service) | Servicio de systemd para que el bot corra siempre. |
+| [deploy.sh](deploy.sh) | En el droplet: baja lo último de GitHub, instala dependencias y reinicia el bot. |
+| [.github/workflows/deploy.yml](.github/workflows/deploy.yml) | Corre `deploy.sh` en el droplet en cada push a `main`. |
 | [autorizar_drive.py](autorizar_drive.py) | Se corre en la Mac una vez para autorizar Google Drive. |
 
 Los secretos (`.env`, `credentials.json`, `token.json`) **no** se suben a
@@ -100,19 +102,33 @@ GitHub; están en [.gitignore](.gitignore).
 Tablas: `gastos`, `ingresos`, `aportaciones` y los catálogos `categorias`,
 `fuentes_ingreso` y `portafolios`.
 
-[schema.sql](schema.sql) se puede correr **siempre** y las veces que sea:
+[schema.sql](schema.sql) tiene dos partes:
 
-- En una base nueva crea todas las tablas y los catálogos.
-- En una base existente solo aplica los cambios que le falten (por ejemplo,
-  agregar `es_vacaciones` o quitar columnas viejas) y no toca tus datos.
+1. **Arriba, los `CREATE TABLE`** con la estructura actual completa. Sirven
+   para una instalación nueva.
+2. **Abajo, `INICIO MIGRACIONES`**: el historial de cambios, uno por versión
+   y separados con comentarios. Las migraciones ya aplicadas quedan
+   **comentadas** como registro; solo la **última** está sin comentar.
 
+El despliegue automático **no toca la base**: una migración solo se puede
+correr una vez (borrar una columna dos veces da error), así que se aplica a
+mano.
+
+**Aplicar la migración pendiente** (una sola vez): en DBeaver, selecciona el
+bloque sin comentar del final de `schema.sql` y ejecútalo como **script**
+(**Option+X** en Mac, Alt+X en Windows). No uses Cmd+Enter: manda todo como
+una sola sentencia y MySQL da error 1064. O desde el droplet:
 ```bash
-mysql -u root -p < /opt/finbot/schema.sql
+sed -n '/^-- INICIO MIGRACIONES/,$p' /opt/finbot/schema.sql | mysql -u root -p
 ```
+(El comando manda solo la parte de migraciones; las comentadas se ignoran.)
+Después cambia `[PENDIENTE]` por `[APLICADA]` en su encabezado.
 
-Para cambiar la estructura en el futuro: actualiza el `CREATE TABLE` (sección 1)
-**y** agrega el paso equivalente en la sección 2 (migraciones), con su
-condición para que solo corra si hace falta.
+**Hacer un cambio nuevo a la base:**
+1. Comenta la migración anterior (pon `-- ` al inicio de cada línea) y márcala `[APLICADA]`.
+2. Escribe la nueva al final con su encabezado `vN (fecha) — qué cambia [PENDIENTE]`.
+3. Actualiza los `CREATE TABLE` de arriba para que queden igual que la base después del cambio.
+4. `git push` y aplica la migración como se explica arriba.
 
 ---
 
@@ -139,25 +155,38 @@ mkdir -p /opt/finbot
 mysql_secure_installation      # contraseña root fuerte, "Y" a casi todo
 ```
 
-### 3. Subir el proyecto y crear la base
+### 3. Bajar el proyecto de GitHub y crear el usuario de MySQL
 
-Desde la **Mac**, en la carpeta del proyecto:
+El repo es privado, así que el droplet necesita una llave de **solo lectura**
+(deploy key) para poder bajarlo. En el **droplet**:
 ```bash
-scp bot.py schema.sql requirements.txt finbot.service root@LA_IP:/opt/finbot/
+ssh-keygen -t ed25519 -f /root/.ssh/github_finbot -N "" -C "droplet-finbot"
+printf 'Host github.com\n  IdentityFile /root/.ssh/github_finbot\n' >> /root/.ssh/config
+ssh-keyscan github.com >> /root/.ssh/known_hosts
+cat /root/.ssh/github_finbot.pub
 ```
+Copia lo que imprime la última línea y pégalo en GitHub → tu repo → **Settings
+→ Deploy keys → Add deploy key** (título `droplet`, **sin** marcar "Allow write
+access").
 
-En el **droplet**:
+Luego, en el droplet (cambia `TU_USUARIO`):
 ```bash
-mysql -u root -p < /opt/finbot/schema.sql
+git config --global --add safe.directory /opt/finbot
+cd /opt/finbot && git init -q -b main && git remote add origin git@github.com:TU_USUARIO/finbot.git
+git fetch origin main && git reset --hard origin/main
+sed '/^-- INICIO MIGRACIONES/q' schema.sql | mysql -u root -p     # crea las tablas (sin migraciones)
 mysql -u root -p -e "
 CREATE USER 'finbot'@'localhost' IDENTIFIED BY 'PON_UNA_CONTRASEÑA';
 GRANT ALL PRIVILEGES ON finbot.* TO 'finbot'@'localhost';
 FLUSH PRIVILEGES;"
 ```
+(Si `/opt/finbot` ya tenía archivos, el `reset --hard` los reemplaza por los de
+GitHub; `.env`, `token.json` y `venv/` no se tocan.)
 
 Si vienes de otro servidor con un respaldo `.sql`, restáuralo
-(`mysql -u root -p finbot < respaldo.sql`) y **después** vuelve a correr
-`schema.sql` para que quede actualizado. Luego borra el respaldo del servidor.
+(`mysql -u root -p finbot < respaldo.sql`) en lugar de crear las tablas y
+aplica las migraciones de `schema.sql` que ese respaldo no tenga. Luego borra
+el respaldo del servidor.
 
 ### 4. Autorizar Google Drive (una vez)
 
@@ -207,15 +236,11 @@ alcanza para meses; es independiente de la suscripción de Claude).
 ### 6. Instalar y arrancar
 
 ```bash
-cd /opt/finbot
-python3 -m venv venv
-venv/bin/pip install -r requirements.txt
-chown -R finbot:finbot /opt/finbot
-cp finbot.service /etc/systemd/system/
-systemctl daemon-reload
-systemctl enable --now finbot
-systemctl status finbot        # debe decir "active (running)"
+cd /opt/finbot && python3 -m venv venv
+./deploy.sh
+systemctl enable finbot        # que arranque solo si se reinicia el droplet
 ```
+`deploy.sh` instala dependencias, instala el servicio y arranca el bot. Debe terminar en "Listo: finbot corriendo".
 
 ### 7. Probar
 
@@ -224,28 +249,52 @@ En Telegram: `GASTO` → Personal → `1 prueba` → ✅, luego `DESHACER` → S
 
 ---
 
-## Actualizar el servidor
+## Despliegue automático (GitHub Actions)
 
-Cada vez que cambie algo:
+Cada `git push` a `main` actualiza el droplet solo: GitHub entra por SSH y
+corre [deploy.sh](deploy.sh), que hace `git pull`, instala dependencias y
+reinicia el bot. Si el cambio incluye una migración de base, aplícala a mano
+(ver [Base de datos](#base-de-datos)). El resultado se ve en GitHub →
+pestaña **Actions** (✅ o ❌ con el error).
 
-Desde la **Mac**:
-```bash
-scp bot.py schema.sql requirements.txt root@LA_IP:/opt/finbot/
-```
-
-En el **droplet**:
-```bash
-mysql -u root -p < /opt/finbot/schema.sql
-cd /opt/finbot && venv/bin/pip install -r requirements.txt
-chown -R finbot:finbot /opt/finbot
-systemctl restart finbot
-journalctl -u finbot -n 30 --no-pager      # revisar que no haya errores
-```
-
-Y guardar el cambio en GitHub:
 ```bash
 git add . && git commit -m "Describe el cambio" && git push
 ```
+
+Para desplegar sin hacer push: GitHub → **Actions → Deploy → Run workflow**, o
+desde la Mac `ssh root@LA_IP /opt/finbot/deploy.sh`.
+
+### Configuración (una sola vez)
+
+Requiere el paso 3 de la instalación (el droplet ya baja el repo de GitHub).
+
+1. En la **Mac**, crea una llave solo para GitHub Actions:
+   ```bash
+   ssh-keygen -t ed25519 -f ~/.ssh/finbot_actions -N "" -C "github-actions-finbot"
+   ```
+2. Autorízala en el droplet **restringida a correr solo `deploy.sh`** (aunque
+   alguien la robara, no podría abrir una terminal ni hacer otra cosa). Desde
+   la Mac:
+   ```bash
+   echo "command=\"/opt/finbot/deploy.sh\",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty $(cat ~/.ssh/finbot_actions.pub)" | ssh root@LA_IP 'cat >> /root/.ssh/authorized_keys'
+   ```
+3. Saca la huella del droplet para que GitHub sepa que se conecta al correcto:
+   ```bash
+   ssh-keyscan LA_IP 2>/dev/null
+   ```
+4. En GitHub → tu repo → **Settings → Secrets and variables → Actions → New
+   repository secret**, crea tres:
+
+   | Nombre | Valor |
+   |---|---|
+   | `DEPLOY_SSH_KEY` | Todo el contenido de `~/.ssh/finbot_actions` (la **privada**, sin `.pub`): `cat ~/.ssh/finbot_actions` |
+   | `DROPLET_IP` | La IP del droplet |
+   | `DROPLET_KNOWN_HOSTS` | Todo lo que imprimió el paso 3 |
+
+5. Prueba: **Actions → Deploy → Run workflow**.
+
+Si tienes un firewall de DigitalOcean que solo deja entrar SSH desde tu casa,
+GitHub no podrá conectarse; en ese caso usa `ssh root@LA_IP /opt/finbot/deploy.sh`.
 
 ---
 

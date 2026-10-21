@@ -1,0 +1,25 @@
+# En cada push a main, entra al droplet y corre deploy.sh.
+# La llave solo puede ejecutar deploy.sh (ver README → Despliegue automático).
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:   # botón "Run workflow" para desplegar a mano
+
+concurrency: deploy
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Desplegar en el droplet
+        env:
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.DROPLET_KNOWN_HOSTS }}
+          DROPLET_IP: ${{ secrets.DROPLET_IP }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519 && chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          ssh -T -o StrictHostKeyChecking=yes root@"$DROPLET_IP"

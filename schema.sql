@@ -1,20 +1,18 @@
 -- ============================================================
---  FINBOT - Base de datos (MySQL 8)
+--  FINBOT - Esquema MySQL
 --
---  Un solo archivo para instalar Y para actualizar:
---    mysql -u root -p < schema.sql
+--  Instalación nueva (solo crea las tablas, sin migraciones):
+--    sed '/^-- INICIO MIGRACIONES/q' schema.sql | mysql -u root -p
 --
---  Se puede correr las veces que quieras: en una base nueva crea todo,
---  en una base existente solo aplica los cambios que le falten.
+--  Base existente: corre UNA vez la última migración (la única sin
+--  comentar, al final del archivo), por ejemplo desde DBeaver.
 -- ============================================================
 
 CREATE DATABASE IF NOT EXISTS finbot
   CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 USE finbot;
 
--- ============================================================
---  1) TABLAS (estado actual)
--- ============================================================
+-- -------------------- Catálogos --------------------
 
 CREATE TABLE IF NOT EXISTS categorias (
   id          INT AUTO_INCREMENT PRIMARY KEY,
@@ -31,6 +29,8 @@ CREATE TABLE IF NOT EXISTS portafolios (
   descripcion VARCHAR(60) NOT NULL UNIQUE,
   activo      BOOLEAN NOT NULL DEFAULT TRUE   -- solo los activos salen como opción en el bot
 );
+
+-- -------------------- Tabla principal: gastos --------------------
 
 CREATE TABLE IF NOT EXISTS gastos (
   id                    INT AUTO_INCREMENT PRIMARY KEY,
@@ -52,6 +52,8 @@ CREATE TABLE IF NOT EXISTS gastos (
   INDEX idx_vacaciones (es_vacaciones)
 );
 
+-- -------------------- Tabla: ingresos --------------------
+
 CREATE TABLE IF NOT EXISTS ingresos (
   id          INT AUTO_INCREMENT PRIMARY KEY,
   fuente_id   INT NOT NULL,
@@ -61,6 +63,8 @@ CREATE TABLE IF NOT EXISTS ingresos (
   CONSTRAINT fk_ingreso_fuente FOREIGN KEY (fuente_id) REFERENCES fuentes_ingreso(id),
   INDEX idx_fecha_ing (fecha)
 );
+
+-- -------------------- Tabla: aportaciones (ahorro) --------------------
 
 CREATE TABLE IF NOT EXISTS aportaciones (
   id            INT AUTO_INCREMENT PRIMARY KEY,
@@ -72,59 +76,7 @@ CREATE TABLE IF NOT EXISTS aportaciones (
   INDEX idx_fecha_ap (fecha)
 );
 
--- ============================================================
---  2) MIGRACIONES (para bases creadas con versiones anteriores)
---     Cada paso revisa primero si hace falta; si no, no hace nada.
--- ============================================================
-
-DROP PROCEDURE IF EXISTS ejecutar_si;
-DELIMITER //
-CREATE PROCEDURE ejecutar_si(condicion BOOLEAN, sentencia TEXT)
-BEGIN
-  IF condicion THEN
-    SET @sql = sentencia;
-    PREPARE st FROM @sql;
-    EXECUTE st;
-    DEALLOCATE PREPARE st;
-  END IF;
-END//
-DELIMITER ;
-
--- ¿Qué existe hoy en la base? (1 = sí, 0 = no)
-SET @hay_vacaciones = (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = 'finbot'
-                       AND table_name = 'gastos' AND column_name = 'es_vacaciones');
-SET @hay_activo     = (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = 'finbot'
-                       AND table_name = 'portafolios' AND column_name = 'activo');
-SET @hay_fk_forma   = (SELECT COUNT(*) FROM information_schema.table_constraints WHERE table_schema = 'finbot'
-                       AND table_name = 'gastos' AND constraint_name = 'fk_gasto_formapago');
-SET @hay_forma      = (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = 'finbot'
-                       AND table_name = 'gastos' AND column_name = 'forma_pago_id');
-SET @hay_conciliado = (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = 'finbot'
-                       AND table_name = 'gastos' AND column_name = 'conciliado');
-
--- v3: bandera de vacaciones
-CALL ejecutar_si(@hay_vacaciones = 0,
-  'ALTER TABLE gastos ADD COLUMN es_vacaciones BOOLEAN NOT NULL DEFAULT FALSE AFTER es_pareja,
-                      ADD INDEX idx_vacaciones (es_vacaciones)');
-
--- v3: solo PROFUTURO, ACTIVA y MERCADO PAGO como opciones de ahorro.
---     Los portafolios viejos no se borran (tienen aportaciones ligadas), se desactivan.
-CALL ejecutar_si(@hay_activo = 0,
-  'ALTER TABLE portafolios ADD COLUMN activo BOOLEAN NOT NULL DEFAULT TRUE');
-CALL ejecutar_si(@hay_activo = 0,
-  'UPDATE portafolios SET activo = descripcion IN (''PROFUTURO'',''ACTIVA'',''MERCADO PAGO'')');
-
--- v4: se eliminan forma de pago y conciliado
-CALL ejecutar_si(@hay_fk_forma > 0, 'ALTER TABLE gastos DROP FOREIGN KEY fk_gasto_formapago');
-CALL ejecutar_si(@hay_forma > 0,    'ALTER TABLE gastos DROP COLUMN forma_pago_id');
-CALL ejecutar_si(@hay_conciliado > 0, 'ALTER TABLE gastos DROP COLUMN conciliado');
-DROP TABLE IF EXISTS formas_pago;
-
-DROP PROCEDURE ejecutar_si;
-
--- ============================================================
---  3) CATÁLOGOS INICIALES (no duplica si ya existen)
--- ============================================================
+-- -------------------- Datos iniciales --------------------
 
 INSERT IGNORE INTO categorias (descripcion) VALUES
   ('SUBSCRIPCIONES'),('DONACIONES'),('CUIDADO PERSONAL'),
@@ -137,3 +89,37 @@ INSERT IGNORE INTO fuentes_ingreso (descripcion) VALUES
 
 INSERT IGNORE INTO portafolios (descripcion) VALUES
   ('PROFUTURO'),('ACTIVA'),('MERCADO PAGO');
+
+
+-- ############################################################
+-- INICIO MIGRACIONES
+--  Historial de cambios a una base existente, de la más vieja a la
+--  más nueva. Las ya aplicadas quedan comentadas como registro; solo
+--  la última está sin comentar. Al agregar una nueva: comenta la
+--  anterior, escribe la nueva al final y actualiza los CREATE TABLE
+--  de arriba para que reflejen el estado final.
+-- ############################################################
+
+-- ------------------------------------------------------------
+--  v3 (2026-10-12) — Vacaciones y solo 3 cuentas de ahorro   [APLICADA]
+-- ------------------------------------------------------------
+-- ALTER TABLE gastos
+--   ADD COLUMN es_vacaciones BOOLEAN NOT NULL DEFAULT FALSE AFTER es_pareja,
+--   ADD INDEX idx_vacaciones (es_vacaciones);
+--
+-- ALTER TABLE portafolios ADD COLUMN activo BOOLEAN NOT NULL DEFAULT TRUE;
+-- INSERT IGNORE INTO portafolios (descripcion) VALUES
+--   ('PROFUTURO'),('ACTIVA'),('MERCADO PAGO');
+-- UPDATE portafolios
+--   SET activo = descripcion IN ('PROFUTURO','ACTIVA','MERCADO PAGO');
+
+-- ------------------------------------------------------------
+--  v4 (2026-10-20) — Se eliminan forma de pago y conciliado   [PENDIENTE]
+-- ------------------------------------------------------------
+--  Si el primer ALTER marca error, revisa el nombre real de la llave con
+--  SHOW CREATE TABLE gastos;  (la línea CONSTRAINT ... REFERENCES formas_pago)
+--  y cámbialo abajo.
+USE finbot;
+ALTER TABLE gastos DROP FOREIGN KEY fk_gasto_formapago;
+ALTER TABLE gastos DROP COLUMN forma_pago_id, DROP COLUMN conciliado;
+DROP TABLE formas_pago;
